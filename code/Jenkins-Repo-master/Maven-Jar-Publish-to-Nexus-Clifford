@@ -1,0 +1,47 @@
+pipeline {
+    agent any
+    tools {
+        maven 'maven_3_6_3'
+        jdk 'java-11'
+	}
+    stages {
+        stage('Initialize') {
+            steps {
+                sh """
+                echo "PATH=$PATH"
+                echo "M2_HOME=$M2_HOME"
+                echo "JAVA_HOME=$JAVA_HOME"
+                """
+            }
+        }
+        stage('Buil Maven') {
+            steps {
+                sh 'mvn clean package'
+            }
+        }
+        stage('Publish JAR file to Nexus') {
+            steps {
+                nexusArtifactUploader artifacts: [
+                    [
+                        artifactId: 'pecos-json-schema',
+                        classifier: '',
+                        file: 'target/pecos-json-schema-1.0-SNAPSHOT.jar',
+                        type: 'jar'
+                    ]
+                ],
+                credentialsId: 'devops-nexus-admin',
+                groupId: 'gov.hhs.cms.pecos',
+                nexusUrl: 'nexus.pecos-devops.cpi.cmscloud.local',
+                nexusVersion: 'nexus3',
+                protocol: 'http',
+                repository: 'pecos-maven/',
+                version: '1.0'
+            }
+        }
+    }
+    post { 
+        always { 
+            cleanWs()
+        }
+    }
+}

@@ -1,0 +1,106 @@
+pipeline {
+    agent any
+    triggers {
+      pollSCM('* * * * *')
+    }
+    environment {
+        def BRANCH_NAME = "${GIT_BRANCH.replaceFirst(/^.*\//, '')}"
+        def COMMIT = "${GIT_COMMIT.substring(0,8)}"
+        dockerImage = ''
+    }
+    stages {
+        stage("Build Gradle") {
+            steps {
+                echo 'Gradle Build Started'
+                sh 'chmod +x ./gradlew'
+                sh './gradlew clean build --no-daemon' //run a gradle task
+            }
+        }
+        stage("Code-Analysis") {
+            parallel {
+                stage('Quality Gate - Sonar') {
+                    steps {
+                        withSonarQubeEnv('sonarqube-okd') {
+                            sh """                             
+                            JAVA_HOME=/usr/java/amazoncorretto11
+                            export PATH=/apps/tools/sonar-scanner-4.5.0/bin/:$PATH   
+                            sonar-scanner -Dsonar.projectKey=$JOB_NAME-$BRANCH_NAME
+                            """
+                        }
+                        timeout(time: 10, unit: 'MINUTES') {
+                            //  waitForQualityGate abortPipeline: true
+                            script{
+                                def qg = waitForQualityGate() // Reuse taskId previously collected by withSonarQubeEnv
+                                if (qg.status != 'OK') {
+                                    // error "Pipeline aborted due to quality gate failure: ${qg.status}"
+                                    currentBuild.result='UNSTABLE'
+                                }
+                            }
+                        }
+                    }
+                    post {
+                        always {
+                            echo "I am running from always"
+                        }
+                        unstable {
+                            echo "unstable"
+                        }
+                        success {
+                            echo "success"
+                        }
+                        failure {
+                            echo "failure"
+                        }
+                        changed {
+                            echo "chnaged"
+                        }
+                    }
+                }
+            } 
+        }      
+        stage('Build Docker image') {
+            steps {
+                echo 'Starting to build docker image'
+                script {
+                    echo 'Bild Docker Image'
+                    dockerImage = docker.build("national-record:${COMMIT}")
+                }
+            }
+        }
+        stage("Twistlock Image Scan") {
+            steps {
+                echo 'Twistlock Image Scan'
+            }
+        }
+        stage("Push Image to OKD") {
+            steps {
+                echo 'Push Image to OKD'
+            }
+        }
+        stage("Push Image to ECR") {
+            steps {
+                echo 'Push Image to ECR'
+                script {
+                    docker.withRegistry('https://857548234366.dkr.ecr.us-east-1.amazonaws.com', 'ecr:us-east-1:devops-jenkins-aws-secrets') {
+                        dockerImage.push("$COMMIT")
+                    }
+                }
+            }
+        }
+        stage("Deploy to EKS") {
+            steps {
+                echo 'Deploy to EKS Staging'
+            }
+        }
+        stage("Smoke test") {
+            steps {
+                echo 'Smoke test'
+            }
+        }
+    }
+    post { 
+        always { 
+            cleanWs()
+        }
+    }
+}

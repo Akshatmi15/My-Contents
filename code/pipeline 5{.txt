@@ -1,0 +1,97 @@
+pipeline {
+    agent any
+    tools {
+        maven 'maven_3_6_3'
+        jdk 'java-11'
+	}
+
+    stages {
+        
+        stage('Smoke Test') {
+            steps {
+                git branch: '1.0.1',
+                credentialsId: 'GitHub-Srikanth',
+                url: 'https://github.cms.gov/pecos-application-development/pecos-test-automation.git'
+                sh """ls -lat
+                chmod +x src/test/resources/Drivers/geckodriver
+                chmod -R 777 *
+                export DISPLAY=:0.0
+                mvn clean test -Denv_run=DEV -DExecution_env=local  -Ddriver=true -DtestNGFile=testng.xml -Daxe508=false -Dheadless=true  -Dcucumber.filter.tags="@login"
+                """
+                sh 'chmod -R 777 *'
+                dir('/apps/jenkins/workspace/test-automation/test-output/SparkReport') {
+                    emailext attachmentsPattern: 'Spark.html',
+                    from: 'PECOS2.0DevSecOpsCMTeam@cgifederal.com',
+                    to: 'ananta.vaddiparti@cgifederal.com,sachutun@cgifederal.com,akshat.mishra@cgifederal.com',
+                    body: "Job ${env.JOB_NAME} build ${env.BUILD_NUMBER}\n More info at: ${env.BUILD_URL}\n\nAttached are Unit and Smoke Test results",
+                    subject: "Jenkins Build : Job ${env.JOB_NAME} Unit and Smoke Test results"
+                }
+            }
+        }
+         stage('Regression Test') {
+             steps {
+                git branch: '1.0.1',
+                 credentialsId: 'GitHub-Srikanth',
+                 url: 'https://github.cms.gov/pecos-application-development/pecos-test-automation.git'
+                 sh """ls -lat
+                
+                 chmod +x src/test/resources/Drivers/geckodriver 
+                 chmod -R 777 *
+                 export DISPLAY=:0.0
+                 mvn clean test -Denv_run=DEV -DExecution_env=local  -Ddriver=true -DtestNGFile=testng.xml -Daxe508=false -Dheadless=true  -Dcucumber.filter.tags="@regression"
+                
+                """
+                sh 'chmod -R 777 *'
+                dir('/apps/jenkins/workspace/test-automation/test-output/SparkReport') {
+                    emailext attachmentsPattern: 'Regression.html',
+                    from: 'PECOS2.0DevSecOpsCMTeam@cgifederal.com',
+                    to: 'ananta.vaddiparti@cgifederal.com,sachutun@cgifederal.com,akshat.mishra@cgifederal.com',
+                    body: "Job ${env.JOB_NAME} build ${env.BUILD_NUMBER}\n More info at: ${env.BUILD_URL}\n\nAttached are Regression Test results",
+                    subject: "Jenkins Build : Job ${env.JOB_NAME} Unit and Smoke Test results"
+                }
+             }
+         }
+         stage('Checkout API testcases') {
+             steps {
+                 git branch: '1.0.1',
+                 credentialsId: 'GitHub-Srikanth',
+                 url: 'https://github.cms.gov/pecos-application-development/pecos-test-automation.git'
+                 sh """ls -lat
+                 chmod +x src/test/resources/Drivers/geckodriver
+                 chmod -R 777 *
+                 export DISPLAY=:0.0
+                 mvn clean test -Denv_run=DEV -DExecution_env=local  -Ddriver=false -DtestNGFile=testng.xml -Daxe508=false -Dheadless=true  -Dcucumber.filter.tags="@apiSearch"
+                
+                 """
+                sh 'chmod -R 777 *'
+                dir('/apps/jenkins/workspace/test-automation/test-output/SparkReport') {
+                    emailext attachmentsPattern: 'Spark.html',
+                    from: 'PECOS2.0DevSecOpsCMTeam@cgifederal.com',
+                    to: 'ananta.vaddiparti@cgifederal.com,sachutun@cgifederal.com,akshat.mishra@cgifederal.com',
+                    body: "Job ${env.JOB_NAME} build ${env.BUILD_NUMBER}\n More info at: ${env.BUILD_URL}\n\nAttached are API Test results",
+                    subject: "Jenkins Build : Job ${env.JOB_NAME} API Test results"
+                }
+             }
+         }
+
+    }
+    post {  
+         always {  
+             echo 'This will always run'  
+         }  
+         success {  
+             echo 'This will run only if successful'  
+         }  
+         failure {  
+               sh 'chmod -R 777 *'
+                dir('/apps/jenkins/workspace/test-automation/test-output/SparkReport') {
+                    emailext attachmentsPattern: 'FAILED_TEST_RESULTS.html',
+                    from: 'PECOS2.0DevSecOpsCMTeam@cgifederal.com',
+                    to: 'ananta.vaddiparti@cgifederal.com,sachutun@cgifederal.com,akshat.mishra@cgifederal.com',
+                    body: "Job ${env.JOB_NAME} build ${env.BUILD_NUMBER}\n More info at: ${env.BUILD_URL}\n\nAttached are Failed Test results",                    
+                    subject: "FAILED - Jenkins Build : Job ${env.JOB_NAME} Failed Test results"
+                }
+        }  
+        
+    } 
+}

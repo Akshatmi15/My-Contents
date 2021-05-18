@@ -1,0 +1,110 @@
+pipeline {
+    agent any
+    stages {
+        stage('Build') {
+            steps {
+                cleanWs deleteDirs: true
+                sh """
+                if [ ! -d "/usr/lib/jvm/amazon-corretto-11" ]; then
+                
+                curl -k -o /tmp/amazon-corretto-11-x64-linux-jdk.tar.gz -LO https://corretto.aws/downloads/latest/amazon-corretto-11-x64-linux-jdk.tar.gz
+                mkdir /usr/lib/jvm/amazon-corretto-11
+                tar -xvf /tmp/amazon-corretto-11-x64-linux-jdk.tar.gz -C /usr/lib/jvm/amazon-corretto-11 --strip-components 1
+                                 
+                fi 
+                JAVA_HOME=/usr/lib/jvm/amazon-corretto-11
+                if [ ! -d "/usr/lib/maven/bin" ]; then
+                
+                mkdir /usr/lib/maven
+                #unzip ./tools/apache-maven-3.6.3-bin.zip -d /usr/lib/maven
+                tar -xvf ./tools/apache-maven-3.6.3-bin.tar.gz -C /usr/lib/maven --strip-components 1                
+                
+                fi 
+                export PATH=/usr/lib/maven/bin/:$PATH
+                apk update
+                apk add firefox-esr
+                 
+                """
+            }
+        }
+        stage('Smoke Test') {
+            steps {
+                git branch: '1.0.1',
+                credentialsId: 'MYPB',
+                url: 'https://github.cms.gov/pecos-application-development/pecos-test-automation.git'
+                sh """ls -lat
+                JAVA_HOME=/usr/lib/jvm/amazon-corretto-11
+                chmod +x src/test/resources/Drivers/geckodriver
+                export PATH=/usr/lib/maven/bin/:$PATH
+                chmod -R 777 *
+                export DISPLAY=:0.0
+                mvn clean test -Denv_run=DEV -DExecution_env=local  -Ddriver=true -DtestNGFile=testng.xml -Daxe508=false -Dheadless=true  -Dcucumber.filter.tags="@smoke"
+                #mvn clean test -Denv_run=DEV -DExecution_env=local  -Ddriver=true -DtestNGFile=testng.xml -Daxe508=false -Dheadless=true  -Dcucumber.filter.tags="@login"
+                """
+                sh 'chmod -R 777 *'
+                dir('/root/workspace/Test-Automation/test-output/SparkReport') {
+                    emailext attachmentsPattern: 'Spark.html',
+                    from: 'PECOS2.0DevSecOpsCMTeam@cgifederal.com',
+                    to: 'ananta.vaddiparti@cgifederal.com,sachutun@cgifederal.com,akshat.mishra@cgifederal.com',
+                    body: "Job ${env.JOB_NAME} build ${env.BUILD_NUMBER}\n More info at: ${env.BUILD_URL}\n\nAttached are Unit and Smoke Test results",
+                    subject: "Jenkins Build : Job ${env.JOB_NAME} Unit and Smoke Test results"
+                }
+            }
+        }
+       /* stage('Regression Test') {
+            steps {
+                git branch: '1.0.1',
+                credentialsId: 'MYPB',
+                url: 'https://github.cms.gov/pecos-application-development/pecos-test-automation.git'
+                sh """ls -lat
+                JAVA_HOME=/usr/lib/jvm/amazon-corretto-11
+                chmod +x src/test/resources/Drivers/geckodriver
+                export PATH=/usr/lib/maven/bin/:$PATH
+                chmod -R 777 *
+                export DISPLAY=:0.0
+                mvn clean test -Denv_run=DEV -DExecution_env=local  -Ddriver=true -DtestNGFile=testng.xml -Daxe508=false -Dheadless=true  -Dcucumber.filter.tags="@regression"
+                """
+            }
+        }
+        stage('Checkout selenium testcases') {
+            steps {
+                git branch: '1.0.1',
+                credentialsId: 'MYPB',
+                url: 'https://github.cms.gov/pecos-application-development/pecos-test-automation.git'
+                sh """ls -lat
+                JAVA_HOME=/usr/lib/jvm/amazon-corretto-11
+                chmod +x src/test/resources/Drivers/geckodriver
+                export PATH=/usr/lib/maven/bin/:$PATH
+                chmod -R 777 *
+                export DISPLAY=:0.0
+                mvn clean test -Denv_run=DEV -DExecution_env=local  -Ddriver=true -DtestNGFile=testng.xml -Daxe508=false -Dheadless=true  -Dcucumber.filter.tags="@apiSearch"
+                """
+            }
+        }
+        
+        stage('clean ws') {
+            steps {
+                cleanWs deleteDirs: true
+            }
+        } */
+	}
+        post {  
+         always {  
+             echo 'This will always run'  
+         }  
+         success {  
+             echo 'This will run only if successful'  
+         }  
+         failure {  
+               sh 'chmod -R 777 *'
+                dir('/root/workspace/Test-Automation/test-output/SparkReport') {
+                    emailext attachmentsPattern: 'Spark.html',
+                    from: 'PECOS2.0DevSecOpsCMTeam@cgifederal.com',
+                    to: 'ananta.vaddiparti@cgifederal.com,sachutun@cgifederal.com,akshat.mishra@cgifederal.com',
+                    body: "Job ${env.JOB_NAME} build ${env.BUILD_NUMBER}\n More info at: ${env.BUILD_URL}\n\nAttached are Unit and Smoke Test results",
+                    subject: "FAILED - Jenkins Build : Job ${env.JOB_NAME} Unit and Smoke Test results"
+                }
+        }  
+        
+    } 
+}

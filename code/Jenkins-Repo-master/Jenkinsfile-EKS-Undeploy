@@ -1,0 +1,100 @@
+pipeline {
+    agent any
+    parameters {
+        choice(name: 'ENV', choices: ['staging01','int01','impl01','demo01'], description: 'Select EKS environment to Deploy/Update')
+        choice(name: 'myExternalHostedZone', choices: ['pecos-dev.cms.gov', 'pecos-impl.cms.gov', 'pecos-test.cms.gov', 'demo.pecos.cms.gov'], description: 'Select external hosted zone for application')
+        choice(name: 'myInternalHostedZone', choices: ['pecos-demo.cpi.cmscloud.local', 'pecos-dev.cpi.cmscloud.local','pecos-impl.cpi.cmscloud.local','pecos-int.cpi.cmscloud.local','pecos-preprod.cpi.cmscloud.local','pecos-prod.cpi.cmscloud.local','pecos-sandbox.cpi.cmscloud.local','pecos-test.cpi.cmscloud.local','pecos-trng.cpi.cmscloud.local','pecos-uat.cpi.cmscloud.local'], description: 'Select internal hosted zone for microservices')
+    }
+    environment {
+        PATH = "/usr/local/bin/:$PATH"
+        def ClusterName = "${ENV}"
+    }
+    stages {
+        stage("Prepare Env") {
+            steps {
+                cleanWs()
+                script{
+                    sh """
+                    set +x
+                    echo "PATH=$PATH"
+                    """
+                    echo "Preparing Environment for EKS Cluster undeployment"
+                    checkout scm
+                    currentBuild.displayName = "$ENV-${env.BUILD_NUMBER}"
+				}
+            }
+        }
+        stage('Get Cluster Nodes') {
+            steps {
+                echo 'Fetching Cluster Nodes'
+                sh """
+                    kubectl --kubeconfig ~/.kube/config-${ENV} get nodes
+                """
+            }
+        }
+        stage('Get Namespaces') {
+            steps {
+                echo 'Fetching Namespaces'
+                sh """
+                    set +x
+                    kubectl --kubeconfig ~/.kube/config-${ENV} get ns
+                """
+            }
+        }
+        stage('Get All cluster Services') {
+            steps {
+                echo 'Fetching all Cluster services'
+                script {
+                    sh """
+                        set +x
+                        kubectl --kubeconfig ~/.kube/config-${ENV} get svc --all-namespaces
+                    """
+                }
+            }
+        }
+        stage('Delete All cluster Services') {
+            steps {
+                echo 'Deleting all Cluster services'
+                sh """
+                    kubectl --kubeconfig ~/.kube/config-${ENV} -n cert-manager delete svc cert-manager cert-manager-webhook
+                    kubectl --kubeconfig ~/.kube/config-${ENV} -n kube-system delete svc aws-load-balancer-webhook-service kube-dns kubelet metrics-server
+                    kubectl --kubeconfig ~/.kube/config-${ENV} -n monitoring delete svc kube-state-metrics node-exporter prometheus-adapter prometheus-k8s prometheus-operated prometheus-operator
+                    kubectl --kubeconfig ~/.kube/config-${ENV} -n newrelic delete svc nri-bundle-kube-state-metrics nri-bundle-nri-metadata-injection
+                    kubectl --kubeconfig ~/.kube/config-${ENV} -n services delete svc //Need to get the list of deployed services and delete
+                """
+            }
+        }
+        stage('Delete Kube Config') {
+            steps {
+                echo 'Deleting Kube Config'
+                sh"""
+                    rm ~/.kube/config-${ENV}
+                """
+            }
+        }
+        stage('Delete cluster ${ENV}') {
+            steps {
+                echo 'Deleting Cluster ${ENV}'
+                sh """
+                    eksctl delete cluster --name &{ENV} --region us-east-1
+                """
+            }
+        }
+        stage('Delete AWS IAM Role ') {
+            steps {
+                echo 'Deleting IAM Role '
+                sh"""
+                    echo 'Role to delete example: aws_eks_demo01_alb, demo01_cluster_autoscaler, demo0120210427135934124900000001, demo012021042714091654400000000a and eksctl-demo01-addon-iamserviceaccount-kube-s-Role1-17PP3467Y41GA'
+                """
+            }
+        }
+        stage('Delete AWS ALB') {
+            steps {
+                echo 'AWS ALB'
+                sh"""
+                   echo 'Need to explore more and see if we can get the ALB by tag Name:elbv2.k8s.aws/cluster and Value:demo01'  
+                """
+            }
+        }
+    }
+}

@@ -1,0 +1,133 @@
+pipeline {
+    agent any
+
+    stages {
+        stage('Build') {
+            steps {
+
+                sh """
+        
+                if [ ! -d "/usr/lib/jvm/amazon-corretto-11" ]; then
+        
+                 curl -k -o /tmp/amazon-corretto-11-x64-linux-jdk.tar.gz -LO https://corretto.aws/downloads/latest/amazon-corretto-11-x64-linux-jdk.tar.gz
+                 mkdir /usr/lib/jvm/amazon-corretto-11
+                 tar -xvf /tmp/amazon-corretto-11-x64-linux-jdk.tar.gz -C /usr/lib/jvm/amazon-corretto-11 --strip-components 1
+                                 
+                fi 
+
+                JAVA_HOME=/usr/lib/jvm/amazon-corretto-11
+                
+                if [ ! -d "/usr/lib/sonar-scanner" ]; then    
+                 curl -k -o /tmp/sonar.zip -LO https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-4.5.0.2216.zip
+                 mkdir /usr/lib/sonar-scanner
+                 unzip /tmp/sonar.zip -d /usr/lib/sonar-scanner           
+                fi 
+
+                export PATH=/usr/lib/sonar-scanner/sonar-scanner-4.5.0.2216/bin/:$PATH
+
+                # chmod +x gradlew
+                # ./gradlew build
+
+                if [ ! -d "/usr/lib/maven" ]; then
+            
+                 mkdir /usr/lib/maven
+                 unzip ./tools/apache-maven-3.6.3-bin.zip -d /usr/lib/maven
+                                 
+                fi 
+                export PATH=/usr/lib/maven/apache-maven-3.6.3/bin/:$PATH
+
+                """
+            }
+        }
+
+      stage('Quality Gate - Sonar') {
+             steps {
+               withSonarQubeEnv('SonarQube') {
+                 sh """
+                 JAVA_HOME=/usr/lib/jvm/amazon-corretto-11
+                 export PATH=/usr/lib/sonar-scanner/sonar-scanner-4.5.0.2216/bin/:$PATH
+                 chmod +x gradlew
+                 ./gradlew build
+                 sonar-scanner
+                 """
+               }
+         }
+       }
+
+       stage("Quality Gate") {
+             steps {
+                 timeout(time: 3, unit: 'MINUTES') {
+                     // Parameter indicates whether to set pipeline to UNSTABLE if Quality Gate fails
+                     // true = set pipeline to UNSTABLE, false = don't
+                     waitForQualityGate abortPipeline: true
+                 }
+             }
+         }
+
+    stage('Checkout selenium testcases') {
+            steps {
+                dir("selenium") {
+                    git branch: 'master',
+                        credentialsId: 'MYPB',
+                        url: 'https://github.cms.gov/pecos-application-development/pecos-automated-testing-new.git'
+
+                    sh """ls -lat
+                        JAVA_HOME=/usr/lib/jvm/amazon-corretto-11
+                         chmod +x src/test/resources/Drivers/geckodriver
+                         export PATH=/usr/lib/maven/apache-maven-3.6.3/bin/:$PATH
+                         mvn test -U -Denv_run=CGISIT -DExecution_env=local -Ddriver=true -DtestNGFile=testng.xml -Daxe508=false -Dcucumber.filter.tags="@homepage"
+                       """
+                }
+            }
+        }
+
+         stage('Build image') {
+            steps { 
+                script {
+                    openshift.withCluster( 'openshift' ) {
+                        openshift.withCredentials( 'openshift-service-account' ) {
+            
+                            def result = openshift.raw('whoami')
+                            def token = openshift.raw('whoami', '-t')
+                            echo "Cluster whoami: ${result.out}"
+                            sh """
+                                docker login https://docker-registry-default.apps.pecos-devops.cpi.cmscloud.local/ -u serviceaccount -p ${token.out}
+                            """
+                        }
+                    }
+                }
+            }    
+         }
+
+         stage ('Docker Build') {
+            steps {
+                // prepare docker build context
+               // sh "cp target/project.war ./tmp-docker-build-context"
+
+                // Build and push image with Jenkins' docker-plugin
+                script {             
+                        repo="default"
+                        def searchapp = docker.build("docker-registry-default.apps.pecos-devops.cpi.cmscloud.local/$repo/searchapp")
+                        def elasticsearch = docker.build("docker-registry-default.apps.pecos-devops.cpi.cmscloud.local/$repo/elasticsearch", "./elasticsearch")
+                        def kibana = docker.build("docker-registry-default.apps.pecos-devops.cpi.cmscloud.local/$repo/kibana", "./kibana")
+                        def logstash = docker.build("docker-registry-default.apps.pecos-devops.cpi.cmscloud.local/$repo/logstash", "./logstash")
+                        searchapp.push()
+                        elasticsearch.push()
+                        kibana.push()
+                        logstash.push()
+                }
+            }
+        }
+
+   
+      
+    
+    //     stage('publish - Nexus') {
+    //         steps {
+    //             echo 'Deploying....'
+    //         }
+    //     }
+
+
+    }
+}

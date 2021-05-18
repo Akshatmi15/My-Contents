@@ -1,0 +1,105 @@
+pipeline {
+    agent any
+
+    parameters { 
+        string(defaultValue: "https://github.com", description: 'Whats the github URL?', name: 'URL')
+        
+    }
+
+stages{  
+    stage('checkout scm') {
+            steps {
+                cleanWs()
+                script{
+                    git credentialsId: 'devops-github-pecos-jenkins-rw-token', url: "${params.URL}"
+                    sh 'git branch -r | awk \'{print $1}\' ORS=\'\\n\' >>branch.txt'
+                }
+
+            }
+        }
+        stage('get build Params User Input') {
+            steps{
+                script{
+
+                    liste = readFile 'branch.txt'
+                    echo "please click on the link here to chose the branch to build"
+                    env.BRANCH_SCOPE = input message: 'Please choose the branch to build ', ok: 'Validate!',
+                            parameters: [choice(name: 'BRANCH_NAME', choices: "${liste}", description: 'Branch to build?')]
+
+
+                }
+            }
+        } 
+                    stage("checkout the branch"){
+                        environment {
+                            def CHECKOUT_BRANCH = "${env.BRANCH_SCOPE.replaceFirst(/^.*\//, '')}"
+                        }
+                        steps{
+                            echo "${env.BRANCH_SCOPE}"
+                            git  credentialsId: 'devops-github-pecos-jenkins-rw-token', url: "${params.URL}"
+                            sh "git checkout ${CHECKOUT_BRANCH}"
+                            sh 'git branch'
+                            
+                        }
+                }
+                stage('Build Docker image') {
+                     environment {
+                            def CHECKOUT_BRANCH = "${env.BRANCH_SCOPE.replaceFirst(/^.*\//, '')}"
+                        }
+                    steps {
+                        echo 'Docker Build Started'
+                        script {
+                                    echo 'Bild Docker Image'
+                                    dockerImage = docker.build("${CHECKOUT_BRANCH}")
+                                }
+                            }
+                            post {
+                                unstable {
+                                    script {
+                                            echo "Build Docker image - is Unstable"
+                                            currentBuild.result='UNSTABLE'
+                                            buildDockerImageStatus=currentBuild.result
+                                                }
+                                            }
+                                    success {
+                                                script {
+                                                        echo "Build Docker image - is Success"
+                                                        buildDockerImageStatus=currentBuild.result
+                                                }
+                                            }
+                                    failure {
+                                                script {
+                                                    echo "Build Docker image - is Failed"
+                                                    currentBuild.result='FAILD'
+                                                    buildDockerImageStatus=currentBuild.result
+                                                }
+                                        } 
+                                   }
+                                }
+                  stage('Quality Gate - Sonar') {
+                        environment {
+                         def projectNameWithBranch = env.BRANCH_SCOPE.replace('/', '-')
+                       }
+                        steps {
+                          withSonarQubeEnv('SonarQube') {
+                                   sh """
+                                    echo "JAVA_HOME=$JAVA_HOME"
+                                    //export PATH=/usr/lib/sonar-scanner/sonar-scanner-4.5.0.2216/bin/:$PATH
+                                    sonar-scanner -Dsonar.projectKey=EKS-Jenkins-$projectNameWithBranch
+                                    
+                                   """
+                              }
+                          }
+                           post {
+                               always {
+                                   timeout(time: 3, unit: 'MINUTES') {
+                                       // Parameter indicates whether to set pipeline to UNSTABLE if Quality Gate fails
+                                      // true = set pipeline to UNSTABLE, false = don't
+                                       waitForQualityGate abortPipeline: true
+                                   }
+                               }
+                            }        
+ 
+
+    } 
+}

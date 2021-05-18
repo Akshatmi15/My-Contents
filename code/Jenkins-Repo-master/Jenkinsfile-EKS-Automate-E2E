@@ -1,0 +1,380 @@
+pipeline {
+    agent any
+    parameters {
+        choice(name: 'ENV', choices: ['staging01','int01','impl01','demo01'], description: 'Select EKS environment to Deploy/Update')
+        choice(name: 'myExternalHostedZone', choices: ['pecos-dev.cms.gov', 'pecos-impl.cms.gov', 'pecos-test.cms.gov', 'demo.pecos.cms.gov'], description: 'Select external hosted zone for application')
+        choice(name: 'myInternalHostedZone', choices: ['pecos-demo.cpi.cmscloud.local', 'pecos-dev.cpi.cmscloud.local','pecos-impl.cpi.cmscloud.local','pecos-int.cpi.cmscloud.local','pecos-preprod.cpi.cmscloud.local','pecos-prod.cpi.cmscloud.local','pecos-sandbox.cpi.cmscloud.local','pecos-test.cpi.cmscloud.local','pecos-trng.cpi.cmscloud.local','pecos-uat.cpi.cmscloud.local'], description: 'Select internal hosted zone for microservices')
+        choice(name: 'AWSCertificateManagerARN', choices: ['arn:aws:acm:us-east-1:857548234366:certificate/ed1b536e-9e4a-4ec9-bf27-dfaf56d4584d', 'arn:aws:acm:us-east-1:857548234366:certificate/64074810-0890-4f3b-bbb1-730ce6ac319e','arn:aws:acm:us-east-1:857548234366:certificate/e2237e15-24be-40ca-b16e-6e535eb5d4bc'], description: 'Select AWS Certificate Manager ARN')
+    }
+    environment {
+        PATH = "/usr/local/bin/:$PATH"
+        def ClusterName = "${ENV}"
+        def LogRegion = 'us-east-1'
+        def FluentBitHttpServer = 'On'
+        def FluentBitHttpPort = '2020'
+        def FluentBitReadFromHead = 'Off'
+        def FluentBitReadFromTail = 'On'
+        def clusterIdentityOIDCissuer = ""
+    }
+    stages {
+        stage("Prepare Env") {
+            steps {
+                cleanWs()
+                script{
+                    sh """
+                    set +x
+                    echo "PATH=$PATH"
+                    """
+                    echo "Preparing Environment for Deployment"
+                    checkout scm
+                    currentBuild.displayName = "$ENV-${env.BUILD_NUMBER}"
+				}
+            }
+        }
+        stage('Terraform Plan') {
+            steps {
+                dir('application'){
+                    sh """
+                    make plan
+                    """
+                    
+                    input message: 'Apply Plan?', ok: 'Apply' 
+
+                }
+                
+            }
+        }
+        stage('Terraform Apply') {
+            steps {
+                dir('application'){
+                    sh """
+                    make apply
+                    """
+                }
+            }
+        }
+        stage('Create Namespace') {
+            steps {
+                echo 'Creating Namespace'
+                script {
+                    sh'''
+                    set +x
+                        verifyNSservices=$(kubectl --kubeconfig ~/.kube/config-${ENV} get ns services 2>&1 | grep Active | awk '{print $2}')
+                            if [ -z "${verifyNSservices}" ]; then
+                                echo "Creating Namespaces services"
+                                kubectl --kubeconfig ~/.kube/config-${ENV} create ns services
+                            else
+                                echo "Namespaces services lready exist"
+                                echo "---End Of Namespaces services Creation ---"
+                                echo ""
+                            fi
+                        verifyNSawscloudwatch=$(kubectl --kubeconfig ~/.kube/config-${ENV} get ns amazon-cloudwatch 2>&1 | grep Active | awk '{print $2}')
+                            if [ -z "${verifyNSawscloudwatch}" ]; then
+                                echo "Creating Namespaces amazon-cloudwatch"
+                                kubectl --kubeconfig ~/.kube/config-${ENV} create ns amazon-cloudwatch
+                            else
+                                echo "Namespaces amazon-cloudwatch already exist"
+                                echo "---End Of Namespaces amazon-cloudwatch Creation ---"
+                                echo ""
+                            fi
+                        verifyNSnewrelic=$(kubectl --kubeconfig ~/.kube/config-${ENV} get ns newrelic 2>&1 | grep Active | awk '{print $2}')
+                            if [ -z "${verifyNSnewrelic}" ]; then
+                                echo "Creating Namespaces newrelic"
+                                kubectl --kubeconfig ~/.kube/config-${ENV} create ns newrelic
+                            else
+                                echo "Namespaces newrelic already exist"
+                                echo "---End Of Namespaces newrelic Creation ---"
+                                echo ""
+                            fi
+                        verifyNSmonitoring=$(kubectl --kubeconfig ~/.kube/config-${ENV} get ns monitoring 2>&1 | grep Active | awk '{print $2}')
+                            if [ -z "${verifyNSmonitoring}" ]; then
+                                echo "Creating Namespaces monitoring"
+                                kubectl --kubeconfig ~/.kube/config-${ENV} create ns monitoring
+                            else
+                                echo "Namespaces monitoring already exist"
+                                echo "---End Of Namespaces monitoring Creation ---"
+                                echo ""
+                            fi
+                        verifyNScertmanager=$(kubectl --kubeconfig ~/.kube/config-${ENV} get ns cert-manager 2>&1 | grep Active | awk '{print $2}')
+                            if [ -z "${verifyNScertmanager}" ]; then
+                                echo "Creating Namespaces cert-manager"
+                                kubectl --kubeconfig ~/.kube/config-${ENV} create ns cert-manager
+                            else
+                                echo "Namespaces cert-manager already exist"
+                                echo "---End Of Namespaces cert-manager Creation ---"
+                                echo ""
+                            fi
+                        verifyNSprometheus=$(kubectl --kubeconfig ~/.kube/config-${ENV} get ns prometheus 2>&1 | grep Active | awk '{print $2}')
+                            if [ -z "${verifyNSprometheus}" ]; then
+                                echo "Creating Namespaces prometheus"
+                                kubectl --kubeconfig ~/.kube/config-${ENV} create ns prometheus
+                            else
+                                echo "Namespaces prometheus already exist"
+                                echo "---End Of Namespaces prometheus Creation ---"
+                                echo ""
+                            fi
+                    '''
+                }
+            }
+        }
+        stage('Create Kubectl config') {
+            steps {
+                echo 'Creating Kubectl config'
+                script {
+                    sh'''
+                    aws eks update-kubeconfig --name ${ENV} --region us-east-1 --kubeconfig ~/.kube/config-${ENV}
+                    '''
+                }
+            }
+        }
+        stage('Get Cluster Nodes') {
+            steps {
+                echo 'Fetching Cluster Nodes'
+                script {
+                    sh ('#!/bin/sh -e\n' + "kubectl --kubeconfig ~/.kube/config-${ENV} get nodes")
+                }
+            }
+        }
+        stage('Create IAM OIDC ') {
+            steps {
+                echo 'Creating IAM OIDC '
+                sh"""
+                    eksctl utils associate-iam-oidc-provider --region us-east-1 --cluster ${ENV} --approve
+                """
+            }
+        }
+        /*stage('Create IAM policy') {
+            steps {
+                echo 'Creating IAM policy'
+                script {
+                    sh'''
+                        verifyIAMPolicy=$(aws iam get-policy --policy-arn arn:aws:iam::857548234366:policy/AWSLoadBalancerControllerIAMPolicy 2>&1)
+                            if [ $? -ne 0 ]; then
+                                if echo ${verifyIAMPolicy} | grep -q NoSuchEntity; then
+                                    curl -o iam-policy.json https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.1.2/docs/install/iam_policy.json
+                                    aws iam create-policy --policy-name AWSLoadBalancerControllerIAMPolicy --policy-document file://iam-policy.json
+                                    echo "Created AWS IAM Policy"
+                                fi
+                            else
+                                echo "AWS IAM Policy already exist"
+                                echo "---End Of AWS IAM Policy Creation ---"
+                                echo ""
+                            fi
+                    '''
+                }
+            }
+        }*/
+        stage('Create IAM role and ServiceAccount for ALB') {
+            steps {
+                echo 'Creating IAM role and ServiceAccount for the AWS Load Balancer controller, use the ARN from the step above'
+                sh"""
+                    eksctl create iamserviceaccount \
+                    --cluster=${ENV} \
+                    --namespace=kube-system \
+                    --region=us-east-1 \
+                    --name=aws-load-balancer-controller \
+                    --attach-policy-arn=arn:aws:iam::857548234366:policy/AWSLoadBalancerControllerIAMPolicy \
+                    --override-existing-serviceaccounts \
+                    --approve
+                """
+            }
+        }
+        stage('Create an OIDC identity provider') {	
+            steps {	
+                script {
+                    OIDC_PROVIDER = sh (returnStdout: true, script: ''' aws eks describe-cluster --name ${ENV} --region us-east-1 --query cluster.identity.oidc.issuer --output text | awk -F/ '{print $NF}' ''').trim()
+                    echo "cluster.identity.oidc.issuer: $OIDC_PROVIDER"
+                    sh """
+                        sed -i -e 's/oidcThumbprint/${OIDC_PROVIDER}/' ALBTrustedRelation.json
+                        cat AutoScallerTrustedRelation.json
+                        aws iam create-role --role-name aws_eks_${ENV}_alb --assume-role-policy-document file://ALBTrustedRelation.json --description "Allows EC2 instances to call AWS services on your behalf."
+                        aws iam attach-role-policy --role-name aws_eks_${ENV}_alb --policy-arn=arn:aws:iam::857548234366:policy/AWSLoadBalancerControllerIAMPolicy
+                    """
+                }
+            }	
+        }
+        stage('Install cert-manager') {
+            steps {
+                echo 'Install cert-manager'
+                sh"""
+                kubectl --kubeconfig ~/.kube/config-${ENV} apply --validate=false -f https://github.com/jetstack/cert-manager/releases/download/v1.3.1/cert-manager.yaml
+                sleep 30
+                """
+            }
+        }
+        stage('Deploy load balancer controller') {
+            steps {
+                echo 'Deploying load balancer controller'
+                sh"""
+                    sed -i 's/{{cluster_name}}/'${ClusterName}'/' aws-load-balancer-controller.yaml | kubectl --kubeconfig ~/.kube/config-${ENV} apply -f aws-load-balancer-controller.yaml
+                    sleep 30
+                """
+            }
+        }
+        stage('Deploy ALB-Services') {
+            steps {
+                echo 'Deploying ALB-Services'
+                script {
+                    sh """
+                        sed -Ei "s|myexternalhostedzone|${myExternalHostedZone}|" alb-ingress.yaml
+                        sed -Ei "s|myinternalhostedzone|${myInternalHostedZone}|" alb-ingress.yaml
+                        sed -Ei "s|awscertificatemanagerarn|${AWSCertificateManagerARN}|" alb-ingress.yaml | kubectl --kubeconfig ~/.kube/config-${ENV} apply -f alb-ingress.yaml
+                    """
+                }
+            }
+        }
+        stage('Auto Scaling - Create New IAM Role') {
+            steps {
+                script {
+                    clusterIdentityOIDCissuer = sh (returnStdout: true, script: ''' aws eks describe-cluster --name ${ENV} --query cluster.identity.oidc.issuer --region us-east-1 --output text | awk -F/ '{print $NF}' ''').trim()
+                    echo "cluster.identity.oidc.issuer: $clusterIdentityOIDCissuer"
+                    sh """
+                    sed -i -e 's/oidcThumbprint/${clusterIdentityOIDCissuer}/' AutoScallerTrustedRelation.json
+                    cat AutoScallerTrustedRelation.json
+                    """
+                    sh'''
+                        
+                     echo "Checking IAM Role exists..."                                                                                                                                                                                                           
+                     IAM_Role_EXISTS=true
+                     set +e                                                                                                                                                                                                                            
+                     VerifyIAMRole=$(aws iam get-role --role-name ${ENV}_cluster_autoscaler 2>&1)                                                                                                                                                 
+
+                     #Some sort of error happened with IAM check                                                                                                                                                                                                    
+                    if [ $? != 0 ]                                                                                                                                                                                                                                
+                    then                                                                                                                                                                                                                                          
+                      NO_IAM_CHECK=$(echo $VerifyIAMRole | grep -c 'NoSuchEntity')                                                                                                                                                                                     
+                      if [ $NO_IAM_CHECK = 1 ]; then                                                                                                                                                                                                              
+                         echo "IAM does not exist"                                                                                                                                                                                                                    
+                         echo "Createing Auto Scaling IAM Role"
+                         aws iam create-role --role-name ${ENV}_cluster_autoscaler --assume-role-policy-document file://AutoScallerTrustedRelation.json
+                         aws iam attach-role-policy --role-name ${ENV}_cluster_autoscaler --policy-arn "arn:aws:iam::857548234366:policy/cluster-autoscaler"
+                      fi
+                   else                                                                                                                                                                                                                                        
+                    echo "IAM_Role_Exist"                                                                                                                                                                                                           
+                    echo "---End Of Auto Scaling IAM Role Creation ---"                                                                                                                                                                                                                                   
+                  fi        
+                    
+                    ''' 
+                }
+            }
+        }
+        stage('Deploy Auto Scaling') {
+            steps {
+                script {
+                    echo 'Deploying Auto Scaling'
+                    sh'''
+                    sed -i 's/{{cluster_name}}/'${ClusterName}'/' cluster-autoscaler-autodiscover.yaml | kubectl --kubeconfig ~/.kube/config-${ENV} apply -f cluster-autoscaler-autodiscover.yaml
+                    '''
+                }
+            }
+        }
+        stage('Annotate cluster-autoscaler service account') {
+            steps {
+                echo 'Annotate the cluster-autoscaler service account with the ARN of the IAM role that you created previously'
+                sh"""
+                kubectl --kubeconfig ~/.kube/config-${ENV} -n kube-system annotate serviceaccount cluster-autoscaler --overwrite eks.amazonaws.com/role-arn=arn:aws:iam::857548234366:role/${ENV}_cluster_autoscaler
+                """
+            }
+        }
+        stage('Patch cluster-autoscaler deployment') {
+            steps {
+                echo 'Patching the deployment to add the cluster-autoscaler.kubernetes.io/safe-to-evict annotation to the Cluster Autoscaler pods'
+                sh"""
+                kubectl --kubeconfig ~/.kube/config-${ENV} patch deployment cluster-autoscaler -n kube-system -p '{"spec":{"template":{"metadata":{"annotations":{"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"}}}}}'
+                """
+            }
+        }
+        stage('Get Kube System Auto Scaling Pods') {
+            steps {
+                echo 'Geting Auto Scaling Pods'
+                sh"""
+                kubectl --kubeconfig ~/.kube/config-${ENV} -n kube-system get pods
+                """
+            }
+        }
+        stage('Get Kube System Nodes') {
+            steps {
+                echo 'Geting Kube System Nodes'
+                sh"""
+                kubectl --kubeconfig ~/.kube/config-${ENV} -n kube-system get nodes
+                """
+            }
+        }
+        stage('Update CoreDNS') {
+            steps {
+                script {
+                    echo 'Updating CoreDNS Deployment'
+                    sh'''
+                    kubectl --kubeconfig ~/.kube/config-${ENV} apply -f coredns.yml
+                    '''
+                }
+            }
+        }
+        stage('Get Kube System End Points') {
+            steps {
+                script {
+                    echo 'Geting Kube System End Points'
+                    sh"""
+                    kubectl --kubeconfig ~/.kube/config-${ENV} -n kube-system get endpoints kube-dns
+                    """
+                }
+            }
+        }
+        stage('Restart CoreDNS') {
+            steps {
+                script {
+                    echo 'Restarting CoreDNS'
+                    sh"""
+                    kubectl --kubeconfig ~/.kube/config-${ENV} -n kube-system rollout restart deploy coredns
+                    """
+                }
+            }
+        }
+        stage("Deploy Cluster Monitoring") {
+            parallel{
+                stage('New Relic Deployment') {
+                    steps {
+                        echo 'New Relic Deployment'
+                        sh """
+                            sed -i 's/{{cluster_name}}/'${ClusterName}'/' newrelic-manifest.yaml | kubectl --kubeconfig ~/.kube/config-${ENV} apply -f newrelic-manifest.yaml
+                        """
+                    }
+                }
+                stage('AWS Cloudwatch Deployment') {
+                    steps {
+                        echo 'AWS Cloudwatch Deployment'
+                        sh """
+                            curl https://raw.githubusercontent.com/aws-samples/amazon-cloudwatch-container-insights/master/k8s-deployment-manifest-templates/deployment-mode/daemonset/container-insights-monitoring/quickstart/cwagent-fluent-bit-quickstart.yaml | sed 's/{{cluster_name}}/'${ClusterName}'/;s/{{region_name}}/'${LogRegion}'/;s/{{http_server_toggle}}/"'${FluentBitHttpServer}'"/;s/{{http_server_port}}/"'${FluentBitHttpPort}'"/;s/{{read_from_head}}/"'${FluentBitReadFromHead}'"/;s/{{read_from_tail}}/"'${FluentBitReadFromTail}'"/' | kubectl --kubeconfig ~/.kube/config-${ENV} apply -f -
+                        """
+                    }
+                }
+                stage('Prometheus Deployment') {
+                    steps {
+                        script {
+                        sh """
+                            sed -i 's/myinternalhostedzone/${myInternalHostedZone}/' monitoring/monitor01/ingress-prometheus-k8s.yaml
+                        """
+                        }
+                        sh"""
+                            kubectl --kubeconfig ~/.kube/config-${ENV} apply -f monitoring/monitor01
+                            sleep 30
+                            kubectl --kubeconfig ~/.kube/config-${ENV} apply -f monitoring/monitor02
+                        """
+                    }
+                }
+                //Need to create branch with environment name and create config-map.yml
+                /*stage('Config Map Deployment') {
+                    steps {
+                        echo 'Config Map Deployment'
+                        git branch: ${ENV}
+                        git branch
+                        sh """
+                        kubectl --kubeconfig ~/.kube/config-${ENV} -n services apply -f k8s/namespaces/services/"${ENV}"-configmap.yml'
+                        //sh 'kubectl --kubeconfig ~/.kube/config-${ENV} -n services rollout restart deploy'
+                        """
+                    }
+                }*/
+            }
+        }
+    }
+}

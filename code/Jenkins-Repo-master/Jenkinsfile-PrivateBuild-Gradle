@@ -1,0 +1,360 @@
+pipeline {
+    agent any
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '7', artifactNumToKeepStr: '10', daysToKeepStr: '10'))
+    }
+    tools {
+        jdk "${jdkVer}"
+	    maven "${mavenVer}"
+	    gradle "${gradleVer}"
+    }
+    parameters {
+        booleanParam(defaultValue: true, description: 'Note: Thich check will ignore scan results and deploys changes to Staging01 environment', name: 'skipScanResultsValidation')
+    }
+    triggers {
+        pollSCM('* H/2 * * *')
+    }
+    environment {
+        //Job Specific property values from pipe.properties
+        def properties = readProperties file: "pipeline.properties"
+	    def appNotificationEmail = "${properties.appNotificationEmail}"
+	    def adminsNotificationEmail = "${properties.adminsNotificationEmail}"
+	    def qaNotificationEmail = "${properties.qaNotificationEmail}"
+	    def mavenVer = "${properties.maven}"
+	    def jdkVer = "${properties.jdk}"
+	    def gradleVer = "${properties.gradle}"
+	    def nexusStage = "${properties.nexusStage}"
+	    sonarscanner = tool 'sonarscanner'
+	    PATH = "${mavenVer}/bin:${jdkVer}/bin:${gradleVer}/bin:${gradleVer}/bin:${scannerHome}/bin:$PATH"
+	    
+	    //Jenkins Job specific values
+        def BRANCH_NAME = "${GIT_BRANCH.replaceFirst(/^.*\//, '')}"
+        def COMMIT = "${GIT_COMMIT.substring(0,8)}"
+        def projectNameWithBranch = env.JOB_NAME.replace('/', '-')
+        def projectFullName = env.JOB_NAME.substring(0, env.JOB_NAME.indexOf("/"));
+        def projectName = projectFullName.substring(0, projectFullName.indexOf("-B"));
+        def ecrRegistry = "857548234366.dkr.ecr.us-east-1.amazonaws.com"
+        dockerImage = ''
+        def jenkins_error = ''
+        def reportPath = "${WORKSPACE}/Reports"
+        
+        //Variable declaration for stages status
+        def buildGradelStatus = 'null'
+        def buildDockerImageStatus = 'null'
+        def owaspDepCheckStatus = 'null'
+        def owaspDepCheckValidationStatus = 'SUCCESS'
+        def sonarScanStatus = 'null'
+        def sonarScanReportValidation = 'null'
+        def twistlockScanStatus = 'null'
+        def twistlockScanValidationStatus = 'null'
+        
+        //Validation switch
+        def skipScanValidation = "$params.skipScanResultsValidation"
+    }
+    stages {
+        stage("Prepare Env") {
+            steps {
+               cleanWs()
+                script{
+                    checkout scm
+                    def gitrep_url = sh(returnStdout: true, script: 'git config remote.origin.url').trim()
+                    echo "Application Repo: $gitrep_url"
+                    echo "Git Branch Name:$BRANCH_NAME"
+                    echo "Git Commit ID:$GIT_COMMIT"
+                    echo "Application Name With Branch:$projectNameWithBranch"
+                    echo "Application:$projectName"
+                    currentBuild.displayName = "$COMMIT-${env.BUILD_NUMBER}"
+                    echo "SkipScanResultsValidation: ${skipScanValidation}"
+                    sh """
+                        set +x
+                        echo "PATH=$PATH"
+                        echo "M2_HOME=$M2_HOME"
+                        echo "JAVA_HOME=$JAVA_HOME"
+                    """
+                }
+            }
+        }
+        stage("Build") {
+            parallel{
+                stage("Build Gradle"){
+                    steps {
+                        echo 'Gradle Build Started'
+                        sh 'chmod +x ./gradlew'
+                        sh './gradlew clean build --no-daemon' //run a gradle task
+                    }
+                    post {
+                        unstable {
+                            script {
+                                echo "Build Gradle - is Unstable"
+                                currentBuild.result='UNSTABLE'
+                                buildGradelStatus=currentBuild.result
+                            }
+                        }
+                        success {
+                            script {
+                            echo "Build Gradle - is Success"
+                            buildGradelStatus=currentBuild.result
+                            }
+                        }
+                        failure { 
+                            script {
+                                echo "Build Gradle - is Failed"
+                                currentBuild.result='FAILD'
+                                buildGradelStatus=currentBuild.result
+                            }
+                        }
+                    }
+                } 
+                stage('Build Docker image') {
+                    steps {
+                        echo 'Docker Build Started'
+                        script {
+                            echo 'Bild Docker Image'
+                            dockerImage = docker.build("$ecrRegistry/$projectName:${COMMIT}")
+                        }
+                    }
+                    post {
+                        unstable {
+                            script {
+                                echo "Build Docker image - is Unstable"
+                                currentBuild.result='UNSTABLE'
+                                buildDockerImageStatus=currentBuild.result
+                            }
+                        }
+                        success {
+                            script {
+                                    echo "Build Docker image - is Success"
+                                    buildDockerImageStatus=currentBuild.result
+                            }
+                        }
+                        failure {
+                            script {
+                                echo "Build Docker image - is Failed"
+                                currentBuild.result='FAILD'
+                                buildDockerImageStatus=currentBuild.result
+                            }
+                        }
+                    }
+                }
+            }
+        } 
+        stage("Code-Analysis") {
+            parallel {
+                stage('SonarQube Code - Scan') {
+                    steps {
+                        script {
+                            try {
+                                withSonarQubeEnv('sonarqube-okd') {
+                                    sh """                             
+                                        export PATH=$sonarscanner/bin/:$PATH   
+                                        sonar-scanner -Dsonar.projectKey=EKS-Jenkins-$projectNameWithBranch
+                                    """
+                                    sonarScanStatus="SUCESS"
+                                } 
+                            } 
+                            catch (e) {
+                                echo " +++++++++++++++++++++++++++++++++++++++++++++++++++ "
+                                echo " SonarQube Code Scan Failed"
+                                echo " +++++++++++++++++++++++++++++++++++++++++++++++++++ "
+                                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                                    sonarScanStatus="FAILED"
+                                    sh "exit 1"
+                                }
+                            }
+                        }
+                    }
+                }
+                stage ('OWASP Dependency-Check') {
+                    steps {
+                        script {
+                            try {
+                                dependencyCheck additionalArguments: '''	
+                                --scan	.
+                                --log ./Reports/dependency-check-report-scan.log
+                                --exclude gradle/**
+                                --out ./Reports
+                                --format	ALL''', odcInstallation: 'dependency-check-6-1-1'
+                                owaspDepCheckStatus="SUCESS"
+                            } 
+                            catch (e) {
+                                echo " +++++++++++++++++++++++++++++++++++++++++++++++++++ "
+                                echo " OWSAP Dependency Check Scan Failed"
+                                echo " +++++++++++++++++++++++++++++++++++++++++++++++++++ "
+                                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                                    owaspDepCheckStatus="FAILED"
+                                    sh "exit 1"
+                                }
+                            }
+                        }
+                    }
+                } 
+                stage("Prisma-Cloud Image Scan") {
+                    steps {
+                        dir ('Reports') {
+                            script {
+                                try {
+                                    echo 'Twistlock - Docker Image Scan Started'
+                                    prismaCloudScanImage ca: '',
+                                    cert: '',
+                                    dockerAddress: 'unix:///var/run/docker.sock',
+                                    image: "$ecrRegistry/$projectName:${COMMIT}",
+                                    key: '',
+                                    logLevel: 'info',
+                                    podmanPath: '',
+                                    project: '',
+                                    resultsFile: 'prisma-cloud-scan-results.json',
+                                    ignoreImageBuildTime:true
+                                    prismaCloudPublish resultsFilePattern: 'prisma-cloud-scan-results.json' 
+                                    twistlockScanStatus="SUCESS"
+                                } 
+                                catch (e) {
+                                    echo " +++++++++++++++++++++++++++++++++++++++++++++++++++ "
+                                    echo " Prisma-Cloud Image Scan Failed"
+                                    echo " +++++++++++++++++++++++++++++++++++++++++++++++++++ "
+                                    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                                        twistlockScanStatus="FAILED"
+                                        sh "exit 1"
+                                    }
+                                }
+                            }
+                        }  
+                    } 
+                }
+            }
+        }
+        stage("Validate Scan Reports") {
+            parallel {
+                stage("OWASP Dependency Report") {
+                    steps {
+                        script {
+                            if ( "${skipScanValidation}" == "true" ) {
+                                echo "OWASP Dependency-Check running with skipScanResultsValidation: ${skipScanValidation}"
+                                dependencyCheckPublisher pattern: '', unstableNewCritical: 1, unstableNewHigh: 1, unstableNewMedium: 1, unstableTotalCritical: 1, unstableTotalHigh: 1, unstableTotalMedium: 1
+                                owaspDepCheckValidationStatus="UNSTABLE"
+                                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                                    sh "exit 1"
+                                }
+                            }
+                            if ( "${skipScanValidation}" == "false" ) {
+                                echo "OWASP Dependency-Check running with skipScanResultsValidation: ${skipScanValidation}"
+                                dependencyCheckPublisher failedNewCritical: 1, failedNewHigh: 1, failedNewMedium: 1, failedTotalCritical: 1, failedTotalHigh: 1, failedTotalMedium: 1, pattern: '', unstableNewLow: 0, unstableTotalLow: 0
+                                owaspDepCheckValidationStatus="FAILED"
+                                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                                    sh "exit 1"
+                                }
+                            }
+                        }
+                    }
+                }
+                stage("Sonar Qality Gate Report") {
+                    steps {
+                        script {
+                            try {
+                                timeout(time: 10, unit: 'MINUTES') {
+                                    script{
+                                        def qg = waitForQualityGate()
+                                        if (qg.status != 'OK') {
+                                            if ( "${skipScanValidation}" == "true" ) {
+                                                echo "Sonal Qality Gate Scan running with skipScanResultsValidation: ${skipScanValidation}"
+                                                currentBuild.result='UNSTABLE'
+                                                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                                                    sonarScanReportValidation='UNSTABLE'
+                                                    sh "exit 1"
+                                                }
+                                            }
+                                            if ( "${skipScanValidation}" == "false" ) {
+                                                echo "Sonal Qality Gate Scan running with skipScanResultsValidation: ${skipScanValidation}"
+                                                currentBuild.result='FAILED'
+                                                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                                                    sonarScanReportValidation='FAILED'
+                                                    sh "exit 1"
+                                                }
+                                            }
+                                        } 
+                                        else {
+                                            sonarScanReportValidation='SUCESS'
+                                        }
+                                    }
+                                } 
+                            } 
+                            catch (e) {
+                                echo " +++++++++++++++++++++++++++++++++++++++++++++++++++ "
+                                echo " Sonal Qality Gate Scan Failed"
+                                echo " +++++++++++++++++++++++++++++++++++++++++++++++++++ "
+                                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                                    sonarScanReportValidation='FAILED'
+                                    sh "exit 1"
+                                }
+                            }
+                        }
+                    }
+                } 
+                stage("Twistlock") {
+                    steps {
+                        script {
+                            def vCriticalCount = sh (returnStdout: true, script: '#!/bin/sh -e\n' + '''cat ${WORKSPACE}/Reports/prisma-cloud-scan-results.json |  jq -r '.[0].entityInfo.vulnerabilityDistribution.critical' ''').trim()
+                            def vHighCount = sh (returnStdout: true, script: '#!/bin/sh -e\n' + '''cat ${WORKSPACE}/Reports/prisma-cloud-scan-results.json |  jq -r '.[0].entityInfo.vulnerabilityDistribution.high' ''').trim()
+                            def vMediumlCount = sh (returnStdout: true, script: '#!/bin/sh -e\n' + '''cat ${WORKSPACE}/Reports/prisma-cloud-scan-results.json |  jq -r '.[0].entityInfo.vulnerabilityDistribution.medium' ''').trim()
+                            def vLowCount = sh (returnStdout: true, script: '#!/bin/sh -e\n' + '''cat ${WORKSPACE}/Reports/prisma-cloud-scan-results.json |  jq -r '.[0].entityInfo.vulnerabilityDistribution.low' ''').trim()
+                            echo " +++++ Twistlock Scan Results: Critical: $vCriticalCount High: $vHighCount Medium: $vMediumlCount Low: $vLowCount +++++"
+                            if( "$vCriticalCount" > '0' || "$vHighCount" > '0' || "$vMediumlCount" > '0') {
+                                if ( "${skipScanValidation}" == "true" ) {
+                                    echo "Twistlock Scan validation running with skipScanResultsValidation: ${skipScanValidation}"
+                                    currentBuild.result='UNSTABLE'
+                                    catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                                        twistlockScanValidationStatus='UNSTABLE'
+                                        sh "exit 1"
+                                    }
+                                }
+                                if ( "${skipScanValidation}" == "false" ) {
+                                    echo "Twistlock Scan validation running with skipScanResultsValidation: ${skipScanValidation}"
+                                    currentBuild.result='FAILED'
+                                    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                                        twistlockScanValidationStatus='FAILED'
+                                        sh "exit 1"
+                                    }
+                                }
+                            } 
+                        }
+                    }
+                }
+            }
+        }
+    }
+    post { 
+        always { 
+            script{
+              	echo 'Cleaning Docker Conatiners and Images'
+              	BUILD_TRIGGER_BY = "${currentBuild.getBuildCauses()[0].shortDescription} / ${currentBuild.getBuildCauses()[0].userId}"
+              	if ( "${buildGradelStatus}" == "null" ) {  buildGradelStatus='Skipped'; echo "Build Gradle Status: $buildGradelStatus" }
+                if ( "${buildDockerImageStatus}" == "null" ) {  buildDockerImageStatus='Skipped'; echo "Build Docker Image Status: $buildDockerImageStatus" }
+                echo " ++++++++ Code Analysis Scan Status +++++++++"
+                if ( "${twistlockScanStatus}" == "null" ) {  twistlockScanStatus='Skipped'; echo "Twistlock Scan Status: $twistlockScanStatus" }
+                if ( "${owaspDepCheckStatus}" == "null" ) {  owaspDepCheckStatus='Skipped'; echo "Build Docker Image Status: $buildDockerImageStatus " }
+                if ( "${sonarScanStatus}" == "null" ) {  sonarScanStatus='Skipped'; echo "SonarQube Code Scan Status: $sonarScanStatus" }
+                echo " ++++++++ Validate Scan Results Status +++++++++"
+                if ( "${twistlockScanValidationStatus}" == "null" ) {  twistlockScanValidationStatus='Skipped'; echo "Twistlock Scan Validation Status: $twistlockScanValidationStatus" }
+                if ( "${owaspDepCheckValidationStatus}" == "null" ) {  owaspDepCheckValidationStatus='Skipped'; echo "OWASP DepCheck Scan Validation Status: $owaspDepCheckValidationStatus" }
+                if ( "${sonarScanReportValidation}" == "null" ) {  sonarScanReportValidation='Skipped'; echo "SonarQube Scan Report Validation: $sonarScanReportValidation" }
+            }
+        }
+		success {  
+            mail to: "PECOS2.0ApplicationTeam1@cgifederal.com,PECOS2.0ApplicationTeam2@cgifederal.com,PECOS2.0ApplicationTeam3@cgifederal.com,PECOS2.0DevSecOpsCMTeam@cgifederal.com", from: 'DoNotReply_Pecos2DevSecOps@cgifederal.com',
+            subject: "Jenkins: ${env.JOB_NAME} - Sucess", 
+            body: "Application / Service Name: $projectName\n\nBuild Number: ${env.BUILD_NUMBER}\n\nJenkins job ${BUILD_TRIGGER_BY}\n\nBuild Duration: ${currentBuild.durationString}\n\nSkip ScanResults Validation: ${skipScanValidation}\n\nBuild Log: ${env.BUILD_URL}\n\nBlue Ocean: ${env.RUN_DISPLAY_URL}\n\n++++++++++ Jenkins Stages Status ++++++++++\n\nBuild Gradel Status: ${buildGradelStatus}\n\nBuild Docker Image Status: ${buildDockerImageStatus}\n\nSonar Scan Status: ${sonarScanStatus}\n\nTwistlock Scan Status: ${twistlockScanStatus}\n\nOWSP Dependency CheckS tatus: ${owaspDepCheckStatus}\n\nTwistlock Scan Validation Status: ${twistlockScanValidationStatus}\n\nOWASP DepCheck Scan Validation Status: ${owaspDepCheckValidationStatus}\n\nSonarQube Scan Report Validation: ${sonarScanReportValidation}\n\n++++++++++ END Of Stages Status ++++++++++\n\nScan Report Links:\nTwistlock: ${env.BUILD_URL}imageVulnerabilities/\nOWSAP Dependency Check: ${env.BUILD_URL}dependency-check-findings/\nSonarQube Quality Gate: http://sonarqube.pecos-devops.cpi.cmscloud.local/dashboard?id=EKS-Jenkins-${projectNameWithBranch}"
+            echo "Jenkins ${env.JOB_NAME} is Sucess" 
+        }  
+        failure {
+            mail to: "PECOS2.0ApplicationTeam1@cgifederal.com,PECOS2.0ApplicationTeam2@cgifederal.com,PECOS2.0ApplicationTeam3@cgifederal.com,PECOS2.0DevSecOpsCMTeam@cgifederal.com", from: 'DoNotReply_Pecos2DevSecOps@cgifederal.com',
+            subject: "Jenkins: ${env.JOB_NAME} - Failed", 
+            body: "Application / Service Name: $projectName\n\nBuild Number: ${env.BUILD_NUMBER}\n\nJenkins job ${BUILD_TRIGGER_BY}\n\nBuild Duration: ${currentBuild.durationString}\n\nSkip ScanResults Validation: ${skipScanValidation}\n\nBuild Log: ${env.BUILD_URL}\n\nBlue Ocean: ${env.RUN_DISPLAY_URL}\n\n++++++++++ Jenkins Stages Status ++++++++++\n\nBuild Gradel Status: ${buildGradelStatus}\n\nBuild Docker Image Status: ${buildDockerImageStatus}\n\nSonar Scan Status: ${sonarScanStatus}\n\nTwistlock Scan Status: ${twistlockScanStatus}\n\nOWSP Dependency CheckS tatus: ${owaspDepCheckStatus}\n\nTwistlock Scan Validation Status: ${twistlockScanValidationStatus}\n\nOWASP DepCheck Scan Validation Status: ${owaspDepCheckValidationStatus}\n\nSonarQube Scan Report Validation: ${sonarScanReportValidation}\n\n++++++++++ END Of Stages Status ++++++++++\n\nScan Report Links:\nTwistlock: ${env.BUILD_URL}imageVulnerabilities/\nOWSAP Dependency Check: ${env.BUILD_URL}dependency-check-findings/\nSonarQube Quality Gate: http://sonarqube.pecos-devops.cpi.cmscloud.local/dashboard?id=EKS-Jenkins-${projectNameWithBranch}"
+            echo "Jenkins ${env.JOB_NAME} is Failed"        
+        }
+        unstable {
+            echo "Jenkins ${env.JOB_NAME} is Unstalbe"
+            mail to: "PECOS2.0ApplicationTeam1@cgifederal.com,PECOS2.0ApplicationTeam2@cgifederal.com,PECOS2.0ApplicationTeam3@cgifederal.com,PECOS2.0DevSecOpsCMTeam@cgifederal.com", from: 'DoNotReply_Pecos2DevSecOps@cgifederal.com',
+            subject: "Jenkins: ${env.JOB_NAME} - Unstable", 
+            body: "Application / Service Name: $projectName\n\nBuild Number: ${env.BUILD_NUMBER}\n\nJenkins job ${BUILD_TRIGGER_BY}\n\nBuild Duration: ${currentBuild.durationString}\n\nSkip Scan Results Validation: ${skipScanValidation}\n\nBuild Log: ${env.BUILD_URL}\n\nBlue Ocean: ${env.RUN_DISPLAY_URL}\n\n++++++++++ Jenkins Stages Status ++++++++++\n\nBuild Gradel Status: ${buildGradelStatus}\n\nBuild Docker Image Status: ${buildDockerImageStatus}\n\nSonar Scan Status: ${sonarScanStatus}\n\nTwistlock Scan Status: ${twistlockScanStatus}\n\nOWSP Dependency CheckS tatus: ${owaspDepCheckStatus}\n\nTwistlock Scan Validation Status: ${twistlockScanValidationStatus}\n\nOWASP DepCheck Scan Validation Status: ${owaspDepCheckValidationStatus}\n\nSonarQube Scan Report Validation: ${sonarScanReportValidation}\n\n++++++++++ END Of Stages Status ++++++++++\n\nScan Report Links:\nTwistlock: ${env.BUILD_URL}imageVulnerabilities/\nOWSAP Dependency Check: ${env.BUILD_URL}dependency-check-findings/\nSonarQube Quality Gate: http://sonarqube.pecos-devops.cpi.cmscloud.local/dashboard?id=EKS-Jenkins-${projectNameWithBranch}"
+        }
+    }
+}

@@ -1,0 +1,32 @@
+
+timeout(time: 1, unit: 'HOURS') { // Just in case something goes wrong, pipeline will be killed after a timeout
+            // From: https://community.sonarsource.com/t/waitforqualitygate-timeout-in-jenkins/2116/8
+            // Seeing an increasing number of communication misfires between sonar/jenkins. going to try this to see if it fixes it
+            sleep(10)
+
+            def qg = waitForQualityGate() // Reuse taskId previously collected by withSonarQubeEnv
+            // Status can be OK, WARN, or something worse (FAIL?)
+            if (qg.status == 'WARN') {
+              // allow build to continue but generate a message
+              println "WARNING: SonarQube quality gate status WARN"
+              // TODO: consider activating "UNSTABLE" status in Jenkins, but this currently breaks PR
+              // merging because Github sees it as test failure. More research needed.
+              // currentBuild.result = "UNSTABLE" // show yellow build in Jenkins
+
+              // Send warning email -- don't use defaults here, as they'll have build status as 'Success'
+              subject = '$PROJECT_NAME - Build # $BUILD_NUMBER - Warning!'
+              b1 = '$PROJECT_NAME - Build # $BUILD_NUMBER - Warning! Code below SonarQube quality gate thresholds.\n'
+              b2 = 'Check console output at $BUILD_URL to view the results.\n\n'
+              body = b1 + b2
+              email(subject: subject, body: body)
+
+            } else if (qg.status != 'OK') {
+              //error "Pipeline aborted due to quality gate failure: ${qg.status}"
+              currentBuild.result='UNSTABLE'
+            }
+          }
+        }
+      }
+    }
+  }   
+} 

@@ -1,0 +1,100 @@
+pipeline {
+    agent any
+
+    stages {
+        stage('Build') {
+            steps {
+
+
+                sh """
+                 
+                if [ ! -d "/usr/lib/maven/bin" ]; then
+            
+                 mkdir /usr/lib/maven
+                 #unzip ./tools/apache-maven-3.6.3-bin.zip -d /usr/lib/maven
+                 tar -xvf ./tools/apache-maven-3.6.3-bin.tar.gz -C /usr/lib/maven --strip-components 1                
+                fi 
+                export PATH=/usr/lib/maven/bin/:$PATH
+
+                """
+            }
+        }
+
+
+        stage("running parallel stage for Unit Testing")
+                {
+                    parallel {
+                        stage('Cucumber Test') {
+                            steps {
+                                dir("cucumber-reports") {
+                                    git branch: 'master',
+                                            credentialsId: 'MYPB',
+                                            url: 'https://github.cms.gov/pecos-application-development/pecos-automated-testing-new.git'
+
+                                    sh """ls -lat
+                                   JAVA_HOME=/usr/lib/jvm/amazon-corretto-11
+                                   chmod +x src/test/resources/Drivers/geckodriver
+                                   export PATH=/usr/lib/maven/bin/:$PATH
+                                   chmod -R 777 *
+                                   export DISPLAY=:0.0
+                                   Xvfb :0.0 -screen 0 1024x768x24 & /var/jenkins_home/tools/maven/bin/mvn clean test -Denv_run=DEV -DExecution_env=local  -Ddriver=true -DtestNGFile=testng.xml -Daxe508=false -Dheadless=true  -Dcucumber.filter.tags="@smoke"
+                                """
+                                }
+                            }
+
+                        }
+                        stage('Regression Test') {
+                            steps {
+                                dir("cucumber-reports") {
+                                    git branch: 'master',
+                                            credentialsId: 'MYPB',
+                                            url: 'https://github.cms.gov/pecos-application-development/pecos-automated-testing-new.git'
+
+                                    sh """ls -lat
+                                   JAVA_HOME=/usr/lib/jvm/amazon-corretto-11
+                                   chmod +x src/test/resources/Drivers/geckodriver
+                                   export PATH=/usr/lib/maven/bin/:$PATH
+                                   chmod -R 777 *
+                                   export DISPLAY=:0.0
+                                   Xvfb :0.0 -screen 0 1024x768x24 & /var/jenkins_home/tools/maven/bin/mvn clean test -Denv_run=DEV -DExecution_env=local  -Ddriver=true -DtestNGFile=testng.xml -Daxe508=false -Dheadless=true  -Dcucumber.filter.tags="@regression"
+                                """
+                                }
+                            }
+                        }
+
+                        stage('Checkout selenium testcases') {
+                            steps {
+                                dir("cucumber-reports") {
+                                    git branch: 'master',
+                                            credentialsId: 'MYPB',
+                                            url: 'https://github.cms.gov/pecos-application-development/pecos-automated-testing-new.git'
+
+                                    sh """ls -lat
+                                   JAVA_HOME=/usr/lib/jvm/amazon-corretto-11
+                                   chmod +x src/test/resources/Drivers/geckodriver
+                                   export PATH=/usr/lib/maven/bin/:$PATH
+                                   chmod -R 777 *
+                                   export DISPLAY=:0.0
+                                   Xvfb :0.0 -screen 0 1024x768x24 & /var/jenkins_home/tools/maven/bin/mvn clean test -Denv_run=DEV -DExecution_env=local  -Ddriver=true -DtestNGFile=testng.xml -Daxe508=false -Dheadless=true  -Dcucumber.filter.tags="@apiSearch"
+                                """
+                                }
+                            }
+                        }
+
+
+                    }
+                }
+
+
+        post {
+            always {
+
+                cleanWs deleteDirs: true
+
+            }
+        }
+
+
+    }
+}
+

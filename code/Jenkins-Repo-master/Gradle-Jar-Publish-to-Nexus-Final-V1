@@ -1,0 +1,89 @@
+pipeline {
+    agent any
+    tools {
+        maven 'maven_3_6_3'
+        jdk 'java-11'
+	}
+    environment {
+        def BRANCH_NAME = "${GIT_BRANCH.replaceFirst(/^.*\//, '')}"
+        def COMMIT = "${GIT_COMMIT.substring(0,8)}"
+        def projectNameWithBranch = env.JOB_NAME.replace('/', '-')
+        def projectFullName = env.JOB_NAME.substring(0, env.JOB_NAME.indexOf("/"));
+        def projectName = projectFullName.substring(0, projectFullName.indexOf("-B"));
+        dockerImage = ''
+}
+    stages {
+        stage("Build Gradle") {
+            steps {
+                echo 'Gradle Build Started'
+                sh 'chmod +x ./gradlew'
+                sh './gradlew clean build --no-daemon' //run a gradle task
+            }
+        }
+        /*stage("Code-Analysis") {
+            parallel {
+                stage('Quality Gate - Sonar') {
+                    steps {
+                        withSonarQubeEnv('sonarqube-okd') {
+                            sh """                             
+                            JAVA_HOME=/usr/java/amazoncorretto11
+                            export PATH=/apps/tools/sonar-scanner-4.5.0/bin/:$PATH   
+                            sonar-scanner -Dsonar.projectKey=$JOB_NAME-$BRANCH_NAME
+                            """
+                        }
+                        timeout(time: 10, unit: 'MINUTES') {
+                            //  waitForQualityGate abortPipeline: true
+                            script{
+                                def qg = waitForQualityGate() // Reuse taskId previously collected by withSonarQubeEnv
+                                if (qg.status != 'OK') {
+                                    // error "Pipeline aborted due to quality gate failure: ${qg.status}"
+                                    currentBuild.result='UNSTABLE'
+                                }
+                            }
+                        }
+                    }
+                    post {
+                        unstable {
+                            echo "unstable"
+                            script {
+                                emailext body: "Jenkins Job: ${env.JOB_NAME} \nBuild Number: ${env.BUILD_NUMBER}\n Job Status: Unstable \n\n  For more info refer: \n Jenkins Build URL: ${env.BUILD_URL}\n SonarQube Scan Results URL: http://sonarqube.pecos-devops.cpi.cmscloud.local/dashboard?id=$JOB_NAME-$BRANCH_NAME",
+                                from: 'PECOS2.0DevSecOpsCMTeam@cgifederal.com',
+                                to: 'sachutun@cgifederal.com',
+                                subject: "Jenkins: SonarQube Scan failed for ${env.JOB_NAME} "
+                            }
+                        }
+                        success {
+                            echo "success"
+                        }
+                        failure {
+                            echo "failure"
+                        }
+                        changed {
+                            echo "chnaged"
+                        }
+                    }
+                }
+            } 
+        }*/
+        stage('Publish JAR file to Nexus') {
+            steps {
+                nexusArtifactUploader artifacts: [
+                    [
+                        artifactId: 'pecos-json-schema',
+                        classifier: '',
+                        file: 'build/libs/pecos-json-schema-0.0.1-SNAPSHOT.jar',
+                        type: 'jar'
+                    ]
+                ],
+                credentialsId: 'devops-nexus-admin',
+                groupId: 'gov.hhs.cms.pecos',
+                nexusUrl: 'nexus.pecos-devops.cpi.cmscloud.local',
+                nexusVersion: 'nexus3',
+                protocol: 'http',
+                repository: 'maven-releases/',
+                version: '0.0.1-SNAPSHOT'
+            }
+        }
+
+    }
+}

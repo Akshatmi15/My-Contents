@@ -1,0 +1,381 @@
+pipeline {
+    agent any
+
+
+    parameters { 
+        string(defaultValue: "https://github.com", description: 'Whats the github URL?', name: 'URL')
+        booleanParam(defaultValue: true, description: 'Note: Thich check will ignore scan results and deploys changes to Staging01 environment', name: 'skipScanResultsValidation')
+        
+    }
+
+stages{  
+    stage('checkout scm') {
+            steps {
+                cleanWs()
+                script{
+                    
+                    git credentialsId: 'devops-github-pecos-jenkins-rw-token', url: "${params.URL}"
+                    //sh 'git branch -r | awk \'{print $1}\' ORS=\'\\n\' >>branch.txt'
+                    sh'''
+                    set +x
+                    git branch -r | grep -i -v -E 'master|dev|hotfix' >>branch.txt
+
+                    '''
+                }
+
+            }
+        }
+        stage('get build Params User Input') {
+            steps{
+                script{
+
+                    liste = readFile 'branch.txt'
+                    echo "please click on the link here to chose the branch to build"
+                    env.BRANCH_SCOPE = input message: 'Please choose the branch to build ', ok: 'Validate!',
+                            parameters: [choice(name: 'BRANCH_NAME', choices: "${liste}", description: 'Branch to build?')]
+                            
+
+
+                }
+            }
+        } 
+                    stage("checkout the branch"){
+                        environment {
+                            //def CHECKOUT_BRANCH = "${env.BRANCH_SCOPE.replaceFirst(/^.*\//, '')}"
+                            def CHECKOUT_BRANCH = "${env.BRANCH_SCOPE}"
+                        }
+                        steps{
+                            echo "${env.BRANCH_SCOPE}"
+                            git  credentialsId: 'devops-github-pecos-jenkins-rw-token', url: "${params.URL}"
+                            sh "git checkout ${CHECKOUT_BRANCH} &> /dev/null"
+                            
+                            
+                        }
+                }
+            stage("Build Npm"){
+                       
+                        environment {
+                            def CHECK_URL = "https://github.cms.gov/pecos-application-development/app-ui.git"
+                            def CMD = "${params.URL}"
+                            
+                           
+                        }
+                     steps{
+
+                        script {
+                          
+                            sh'''   
+                             
+					          
+                              if [[ $CHECK_URL =~ $CMD ]]
+                              then
+                              hash -r
+                              
+                               
+                               npm install
+                               npm run build --prod 
+                               npm -v 
+
+                             else
+                                echo "NPM is not required" 
+                                echo ""
+                             fi                  
+                         ''' 
+                    }
+                }
+                    
+                post {
+                    unstable {
+                            script {
+                                echo "Build Npm - is Unstable"
+                                currentBuild.result='UNSTABLE'
+                                buildNpmStatus=currentBuild.result
+                            }
+                        }
+
+                            success {
+                                script {
+                                        echo "Build Npm - is Success"
+                                        buildNpmStatus=currentBuild.result
+                                        }
+                                    }
+                            failure { 
+                                    script {
+                                            echo "Build Npm - is Failed"
+                                            currentBuild.result='FAILD'
+                                            buildNpmStatus=currentBuild.result
+                                        }
+                                    }
+                                }
+                       }    
+                stage('Build Docker image') {
+                     environment {
+                            //def CHECKOUT_BRANCH = "${env.BRANCH_SCOPE.replaceFirst(/^.*\//, '')}"
+                            def COMMIT = "$BUILD_NUMBER"
+                            //def selectedBranch = "${CHECKOUT_BRANCH}.toLowerCase()"
+                            //def Branch = echo "${CHECKOUT_BRANCH}" | tr '[:upper:]' '[:lower:]'
+                        }
+                    steps {
+                        echo 'Docker Build Started'
+                        script {
+                                    echo 'Bild Docker Image'
+                                    //dockerImage = docker.build("${selectedBranch}")
+                                      dockerImage = docker.build("${COMMIT}")
+                                }     
+                            }
+                            post {
+                                unstable {
+                                    script {
+                                            echo "Build Docker image - is Unstable"
+                                            currentBuild.result='UNSTABLE'
+                                            buildDockerImageStatus=currentBuild.result
+                                                }
+                                            }
+                                    success {
+                                                script {
+                                                        echo "Build Docker image - is Success"
+                                                        buildDockerImageStatus=currentBuild.result
+                                                }
+                                            }
+                                    failure {
+                                                script {
+                                                    echo "Build Docker image - is Failed"
+                                                    currentBuild.result='FAILD'
+                                                    buildDockerImageStatus=currentBuild.result
+                                                }
+                                        } 
+                                   }
+                                }
+        stage("Code-Analysis") {
+            parallel {                
+                     stage('SonarQube Code - Scan') {
+                             environment {
+                         def reportPath = "${WORKSPACE}/Reports"
+                         //def projectNameWithBranch = env.BRANCH_SCOPE.replace('/', '-')
+                         def CHECKOUT_BRANCH = "${env.BRANCH_SCOPE.replaceFirst(/^.*\//, '')}"       
+                         sonarscanner = tool 'sonarscanner'
+
+                       }
+                            steps {
+                                    script {
+                                        try {
+                                                withSonarQubeEnv('sonarqube-okd') {
+                                                    sh """                                                      
+                                                    export PATH=$sonarscanner/bin/:$PATH   
+                                                    sonar-scanner -Dsonar.projectKey=EKS-Jenkins-"${CHECKOUT_BRANCH}"
+                                                    """
+                                                sonarScanStatus="SUCESS"
+                                            } 
+                                        } catch (e) {
+                                            echo " +++++++++++++++++++++++++++++++++++++++++++++++++++ "
+                                            echo " SonarQube Code Scan Failed"
+                                            echo " +++++++++++++++++++++++++++++++++++++++++++++++++++ "
+                                            catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                                                            sonarScanStatus="FAILED"
+                                                            sh "exit 1"
+                                                        }
+                                        }
+                                    }
+                                
+                                }
+                                
+                        }
+                        stage ('OWASP Dependency-Check') {
+                           environment {
+                              def reportPath = "${WORKSPACE}/Reports"        
+                         
+                       }
+                            steps {
+                                script {
+                                    try {
+                                        dependencyCheck additionalArguments: '''	
+                                    --scan	.
+                                    --log ./Reports/dependency-check-report-scan.log
+                                    --exclude node_modules/**
+                                    --out ./Reports
+                                    --noupdate
+                                    --format	ALL''', odcInstallation: 'dependency-check-6-1-1'
+                                    owaspDepCheckStatus="SUCESS"
+                                    } catch (e) {
+                                        echo " +++++++++++++++++++++++++++++++++++++++++++++++++++ "
+                                        echo " OWSAP Dependency Check Scan Failed"
+                                        echo " +++++++++++++++++++++++++++++++++++++++++++++++++++ "
+                                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                                                        owaspDepCheckStatus="FAILED"
+                                                        sh "exit 1"
+                                                    }
+                                    }
+                                    
+                                }
+                            }
+                        }
+                stage("Prisma-Cloud Image Scan") {
+                          environment {
+                            def reportPath = "${WORKSPACE}/Reports"          
+                            //def CHECKOUT_BRANCH = "${env.BRANCH_SCOPE.replaceFirst(/^.*\//, '')}"
+                            def COMMIT = "$BUILD_NUMBER"
+                        }
+                                steps {
+                                    dir ('Reports') {
+                                                script {
+                                                    try {
+                                                        echo 'Twistlock - Docker Image Scan Started'
+                                                        prismaCloudScanImage ca: '',
+                                                        cert: '',
+                                                        dockerAddress: 'unix:///var/run/docker.sock',
+                                                        image: "${COMMIT}",
+                                                        key: '',
+                                                        logLevel: 'info',
+                                                        podmanPath: '',
+                                                        project: '',
+                                                        resultsFile: 'prisma-cloud-scan-results.json',
+                                                        ignoreImageBuildTime:true
+                                                        prismaCloudPublish resultsFilePattern: 'prisma-cloud-scan-results.json' 
+                                                        twistlockScanStatus="SUCESS"
+                                                    } catch (e) {
+                                                        echo " +++++++++++++++++++++++++++++++++++++++++++++++++++ "
+                                                        echo " Prisma-Cloud Image Scan Failed"
+                                                        echo " +++++++++++++++++++++++++++++++++++++++++++++++++++ "
+                                                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                                                                        twistlockScanStatus="FAILED"
+                                                                        sh "exit 1"
+                                                                    }
+                                                    }
+                                                 }
+                                            }  
+                                        } 
+   
+                    }
+        }        
+    }
+
+      stage("Validate Scan Reports") {
+              environment {
+                                def skipScanValidation = "$params.skipScanResultsValidation"
+                                def buildNpmStatus = 'null'
+                                def buildDockerImageStatus = 'null'
+                                def owaspDepCheckStatus = 'null'
+                                def owaspDepCheckValidationStatus = 'SUCCESS'
+                                def sonarScanStatus = 'null'
+                                def sonarScanReportValidation = 'null'
+                                def twistlockScanStatus = 'null'
+                                def twistlockScanValidationStatus = 'null'
+                            } 
+                               
+                parallel {
+                    stage("OWASP Dependency Report") {
+                        steps {
+                            script {
+                                
+                                if ( "${skipScanValidation}" == "true" ) {
+                                                echo "OWASP Dependency-Check running with skipScanResultsValidation: ${skipScanValidation}"
+                                                dependencyCheckPublisher pattern: '', unstableNewCritical: 1, unstableNewHigh: 1, unstableNewMedium: 1, unstableTotalCritical: 1, unstableTotalHigh: 1, unstableTotalMedium: 1
+                                                owaspDepCheckValidationStatus="UNSTABLE"
+                                                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                                                        sh "exit 1"
+                                                    }
+                                            }
+                                if ( "${skipScanValidation}" == "false" ) {
+                                                echo "OWASP Dependency-Check running with skipScanResultsValidation: ${skipScanValidation}"
+                                                dependencyCheckPublisher failedNewCritical: 1, failedNewHigh: 1, failedNewMedium: 1, failedTotalCritical: 1, failedTotalHigh: 1, failedTotalMedium: 1, pattern: '', unstableNewLow: 0, unstableTotalLow: 0
+                                                owaspDepCheckValidationStatus="FAILED"
+                                                catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                                                        sh "exit 1"
+                                                    }
+                                                }
+                                
+                            }
+                            }
+                        }
+                        
+                        stage("Sonar Qality Gate Report") {
+                            steps {
+                                script {
+                                try {
+                                   timeout(time: 10, unit: 'MINUTES') {
+                                    script{
+                                        def qg = waitForQualityGate()
+                                         if (qg.status != 'OK') {
+                                                 if ( "${skipScanValidation}" == "true" ) {
+                                                        echo "Sonal Qality Gate Scan running with skipScanResultsValidation: ${skipScanValidation}"
+                                                                currentBuild.result='UNSTABLE'
+                                                                    catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                                                                                sonarScanReportValidation='UNSTABLE'
+                                                                                sh "exit 1"
+                                                                            }
+                                                                    }
+                                                 if ( "${skipScanValidation}" == "false" ) {
+                                                        echo "Sonal Qality Gate Scan running with skipScanResultsValidation: ${skipScanValidation}"
+                                                                currentBuild.result='FAILED'
+                                                                    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                                                                                sonarScanReportValidation='FAILED'
+                                                                                sh "exit 1"
+                                                                            }
+                                                                  }
+                                            } else {
+                                          sonarScanReportValidation='SUCESS'
+                                            }
+                                        }
+                                    } 
+                                } catch (e) {
+                                        echo " +++++++++++++++++++++++++++++++++++++++++++++++++++ "
+                                        echo " Sonal Qality Gate Scan Failed"
+                                        echo " +++++++++++++++++++++++++++++++++++++++++++++++++++ "
+                                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                                                        sonarScanReportValidation='FAILED'
+                                                        sh "exit 1"
+                                                    }
+                                    }
+                            }
+                                }
+                        } 
+                        stage("Twistlock") {
+                            environment {
+                            //def CHECKOUT_BRANCH = "${env.BRANCH_SCOPE.replaceFirst(/^.*\//, '')}"
+                            def COMMIT = "$BUILD_NUMBER"
+                            //def selectedBranch = "${CHECKOUT_BRANCH}.toLowerCase()"
+                            //def Branch = echo "${CHECKOUT_BRANCH}" | tr '[:upper:]' '[:lower:]'
+                        }
+                            steps {
+                                script {
+                                    def vCriticalCount = sh (returnStdout: true, script: '#!/bin/sh -e\n' + '''cat ${WORKSPACE}/Reports/prisma-cloud-scan-results.json |  jq -r '.[0].entityInfo.vulnerabilityDistribution.critical' ''').trim()
+                                    def vHighCount = sh (returnStdout: true, script: '#!/bin/sh -e\n' + '''cat ${WORKSPACE}/Reports/prisma-cloud-scan-results.json |  jq -r '.[0].entityInfo.vulnerabilityDistribution.high' ''').trim()
+                                    def vMediumlCount = sh (returnStdout: true, script: '#!/bin/sh -e\n' + '''cat ${WORKSPACE}/Reports/prisma-cloud-scan-results.json |  jq -r '.[0].entityInfo.vulnerabilityDistribution.medium' ''').trim()
+                                    def vLowCount = sh (returnStdout: true, script: '#!/bin/sh -e\n' + '''cat ${WORKSPACE}/Reports/prisma-cloud-scan-results.json |  jq -r '.[0].entityInfo.vulnerabilityDistribution.low' ''').trim()
+                                    sh 'docker rmi "${COMMIT}"'
+                                    echo " +++++ Twistlock Scan Results: Critical: $vCriticalCount High: $vHighCount Medium: $vMediumlCount Low: $vLowCount +++++"
+                                    if( "$vCriticalCount" > '0' || "$vHighCount" > '0' || "$vMediumlCount" > '0') {
+                                        if ( "${skipScanValidation}" == "true" ) {
+                                                        echo "Twistlock Scan validation running with skipScanResultsValidation: ${skipScanValidation}"
+                                                                currentBuild.result='UNSTABLE'
+                                                                    catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                                                                                twistlockScanValidationStatus='UNSTABLE'
+                                                                                sh "exit 1"
+                                                                            }
+                                                                    }
+                                                 if ( "${skipScanValidation}" == "false" ) {
+                                                        echo "Twistlock Scan validation running with skipScanResultsValidation: ${skipScanValidation}"
+                                                                currentBuild.result='FAILED'
+                                                                    catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                                                                                twistlockScanValidationStatus='FAILED'
+                                                                                sh "exit 1"
+                                                                                
+                                                                            }
+                                                                  }
+                                        
+                                    } 
+                                    
+                                    
+                                }
+                                
+                                
+                            }
+                        }
+                                
+                    }
+                }        
+
+      
+
+    }
+}   
